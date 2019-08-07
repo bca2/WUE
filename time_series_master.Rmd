@@ -1,0 +1,928 @@
+---
+title: "Time Series analysis of ET data"
+author: "Brendan Alexander"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=6, fig.height=4)
+```
+
+# Overview
+
+
+ough explanation into my modeling decisions is given in a file called "time_series.pdf".
+
+There are 3 major sections (copying the 2003 Bernacchi paper):
+
+1. Single day: cloudy vs sunny fits and graphs for $R_n$, $H$, $G_0$, and $\lambda ET$.
+2. Averaged diurnal differences between treatments (currently just Corn-IC).
+3. Daily $\lambda ET$ graph using total $\lambda ET$ between 11AM and 1PM for Corn, soy and IC.
+
+# Model fits
+
+A typical repeated measures model has the form (using terminology and df specific to a single day of this experiment):
+
+$$\underbrace{y}_{432} = \underbrace{\mu}_{1} + \underbrace{C_i}_{2} + \underbrace{p_{(i)j}}_{6} + \underbrace{T_k}_{47} + \underbrace{CT_{ik}}_{94} + \underbrace{\epsilon_{ijk}}_{282}$$
+
+where $C_i$ it the $i^{th}$ level of crop, $p_{(i)j}$ represents individual plots (analogous to subjects), $T_k$ is the time effect (categorical in our case, unless we want to do a high-order polynomial model or GAM), $CT_{ik}$ is the interaction between crop and time, and $\epsilon_{ijk}$ is the error assumed to be $N\sim (0,\sigma^2)$.
+
+This experiment also has a blocking effect, and I think the correct modification to the model formula is:
+
+$$\underbrace{y}_{432} = \underbrace{\mu}_{1} + \underbrace{b_i}_{2} + \underbrace{C_j}_{2} + \underbrace{\epsilon_{ij}}_{4} + \underbrace{T_k}_{47} + \underbrace{CT_{jk}}_{94} + \underbrace{\epsilon_{ijk}}_{282}$$
+
+where $b_i$ is the blocking effect.
+Both equations have effectively two error terms (in the first equation $p_{(i)j}$ is effectively an error term for $C_i$, these models are constructed similarly to split-plots).
+Notice that including the blocking effect takes 2 df from $\epsilon_{ij}$ and has no effect on $\epsilon_{ijk}$.
+
+This data also seems to have heterogeneous variance based on time of day as well as treatment.
+We solve this issue by including a `weight = ` statement.
+
+For the repeated measures we will include a `correlation = ` statement to allow for time correlation (probably `AR(1)`, but multiple structures have been tried).
+
+A `control = ` statement is included to allow for increased iterations (the complicated analyses need a few more runs to converge than normal).
+
+
+# Single Day analyses (fig 2 from Bernacchi 2003)
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(esquisse)
+library(ggthemes)
+library(gridExtra)
+library(tidyverse)
+library(gtable)
+library(grid)
+library(data.table)
+library(nlme)
+library(emmeans)
+# 
+et <- read.csv('wue.csv')
+et <- head(et,-3)
+et <- droplevels(et)
+
+et <- et%>%
+  #RN
+  mutate(rnsw=(rnsw_1+rnsw_2)/2)%>%
+  mutate(senssw=(senssw_1+senssw_2)/2)%>%
+  mutate(rnlw=(rnlw_1+rnlw_2)/2)%>%
+  mutate(senslw=(senslw_1+senslw_2)/2)%>%
+  mutate(netsw=rnsw/senssw*1000)%>%
+  mutate(netlw=rnlw/senslw*1000)%>%
+  mutate(rn=netsw+netlw)%>%
+  #G0
+  mutate(shfp=(shfp_1+shfp_2+shfp_3+shfp_4)/4)%>%
+  mutate(cal=(cal_1+cal_2+cal_3+cal_4)/4)%>%
+  mutate(g80=shfp*cal)%>%
+  mutate(c=(c_1+c_2+c_3+c_4)/4)%>%
+  mutate(dz=(dz_1+dz_2+dz_3+dz_4)/4)%>%
+  mutate(dT=(dT_1+dT_2+dT_3+dT_4)/4)%>%
+  mutate(dt=(dt_1+dt_2+dt_3+dt_4)/4)%>%
+  mutate(g0=g80+c*dz*(dT/dt))%>%
+  #H
+  mutate(pa=(pa_1+pa_2)/2)%>%
+  mutate(cp=(cp_1+cp_2)/2)%>%
+  mutate(ttat=(ttat_1+ttat_2)/2)%>%
+  mutate(tair=(tair_1+tair_2)/2)%>%
+  mutate(ra=(ra_1+ra_2)/2)%>%
+  mutate(h=pa*cp*((ttat-tair)/ra))%>%
+  mutate(lamet.ave=rn-h)%>% # g0 has been removed from the calculation of lamET due to sensor malfunctions
+  mutate(et.ave=lamet.ave/lam*1800)
+  
+# split timestamp column into smaller components
+month_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",1)
+day_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",2)
+yrtime_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",3)
+yr_split <- sapply(strsplit(yrtime_split,split = ' '),"[",1)
+time_split <- sapply(strsplit(yrtime_split,split = ' '),"[",2)
+t_1 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",1))
+t_2 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",2))/60
+
+#create a new dataframe
+et1 <- cbind(yr_split,month_split,day_split,time_split,t_1,t_2,et)
+
+et1$block <- as.factor(et1$block)
+# dat1$time_split <- as.numeric(as.character(dat1$time_split))
+
+dat1.1 <- et1%>%
+  mutate(t=t_1+t_2)%>%#time in hours
+  mutate(sec=t*60*60) #time in seconds #cumulative time in seconds
+
+dat1.1 <- data.table(dat1.1)
+dat1.1[, seccum := cumsum(dt_1), by=list(treatment, block)]
+
+dat2 <- dat1.1%>%
+  mutate(cumdays=seccum*1.1574*10^-5)%>%
+  mutate(dayofyear=cumdays+198)%>%
+  filter(dayofyear<=250)
+
+# This filters out a lot of September data, readings were erratic in September
+# This also creates the subject level tag for each plot (id)
+# We create the t-fac variable here (it's just time as a categorical variable)
+
+
+dat_time_day <- dat2%>%
+  filter(dayofyear<=250)%>%
+  mutate(dayofyear = signif(dayofyear, digits = 5))%>%
+  mutate(dayofyear = as.factor(floor(dayofyear)))%>%
+  mutate(id = 
+           ifelse(block == "1" & treatment == "corn","1",
+           ifelse(block == "2" & treatment == "corn","2",
+           ifelse(block == "3" & treatment == "corn","3",
+           ifelse(block == "1" & treatment == "ic","4",
+           ifelse(block == "2" & treatment == "ic","5",
+           ifelse(block == "3" & treatment == "ic","6",
+           ifelse(block == "1" & treatment == "soy","7",
+           ifelse(block == "2" & treatment == "soy","8","9")))))))))%>%
+  mutate(t_fac = as.factor(t))%>%
+  mutate(plot = 
+           ifelse(block == "1" & treatment == "corn","1",
+           ifelse(block == "2" & treatment == "corn","2",
+           ifelse(block == "3" & treatment == "corn","3",
+           ifelse(block == "1" & treatment == "ic","3",
+           ifelse(block == "2" & treatment == "ic","1",
+           ifelse(block == "3" & treatment == "ic","2",
+           ifelse(block == "1" & treatment == "soy","2",
+           ifelse(block == "2" & treatment == "soy","3","1")))))))))%>%
+  mutate(plot=as.factor(plot))%>%
+  mutate(trt_time = paste0(treatment,t_fac))
+
+# Getting rid of many columns we no longer need...
+
+dat_time_day_reduced = dat_time_day%>%
+  select(c("dayofyear","month_split","day_split", "block","treatment","rn","g0","h","lamet.ave","et.ave","t","id","cumdays", "t_fac","plot","trt_time"))
+
+# dat_averaged <- dat_time_day%>%
+#   select(c("dayofyear","block","treatment","rn","g0","h","lamet.ave","et.ave","t","id","cumdays", "t_fac","plot"))%>%
+#   group_by(block, treatment, id,t,t_fac, plot,trt_time)%>%
+#   summarize(mean_rn=mean(rn),mean_g0=mean(g0),mean_h=mean(h),mean_lamet=mean(lamet.ave),mean_et=mean(et.ave))
+
+```
+
+
+Here's where you can see the days that are currently selected as "sunny" and "cloudy".
+Change them as you like using the *time_series_master.rmd* document.
+
+The models here run for September 8th and August 31st.
+Changing the date will likely result in the models not running correctly.
+There could always be nuissance issues that arise on different days that the model wasn't built for.
+Outlying blocks or observations can cause excessive variability, and that causes the variability components to be poorly estimated, resulting in poor residual graphs.
+I wouldn't expect any major differences day to day in general though, just graph the data and check to make sure if anything seems a little off on a particular day.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# fit_sas0 is the most similar to sas so far
+ctrl <- lmeControl(maxIter = 5000, msMaxIter = 5000, iter.max = 10000,opt='optim')
+# , opt='optim'
+```
+
+
+
+```{r}
+dat_cloudy <- dat_time_day_reduced%>%
+  filter(month_split==9 & day_split==1) # Change the month and day here
+
+write.csv(dat_cloudy, file = "sas_cloudy.csv")
+
+
+dat_sunny <- dat_time_day_reduced%>%
+  filter(month_split==8 & day_split==31) # Change the month and day here
+
+write.csv(dat_sunny, file = "sas_sunny.csv")
+
+```
+
+## Issues with the data
+
+1. $R_n$ is not replicated over treatments so we can't run a model with treatment as a variable.
+We could run a model that estimates $R_n$ wihtout treatment as a variable if we want to use a "global" estimate for $\lambda ET$ calculations.
+In Bernacchi (2003) it doesn't seem like $R_n$ has much variability to begin with, so I think it probably doesn't matter.
+
+2. $G_0$ is replicated, but in an incomplete block design (IC in blocks 1,3; Corn in blocks 1,2; Soy in blocks 2,3).
+Including block as a random variable might make complicated models harder to run.
+We can always drop block as an effect for $G_0$ models and have $n=2$.
+
+Additionally, $G_0$ measurements seem to have maximum and minimum "caps"
+
+```{r, fig.cap="G0 on August 31st. Unexpected cap?"}
+ggplot(dat_sunny) +
+ aes(x = t, y = g0, colour = block) +
+ geom_point(size = 1L) +
+ scale_color_hue() +
+ theme_minimal() +
+ facet_wrap(vars(treatment))
+```
+
+
+3. Some `block*treatment` combinations behave oddly on some days.
+It doesn't seem to always be the same combinations.
+
+Example issue with blocks:
+Notice that the third block for soy seems to be a major outlier.
+
+It doesn't seem like it's always the same treatment or block, it's day dependent.
+
+```{r, fig.cap="H on August 31st. Notice that the third block for soy seems to be a major outlier (bug on the sensor that day?)."}
+ggplot(dat_sunny) +
+ aes(x = t, y = h, colour = block) +
+ geom_point(size = 1L) +
+ scale_color_hue() +
+ theme_minimal() +
+ facet_wrap(vars(treatment))
+```
+
+\pagebreak
+
+## Sunny
+
+### $\lambda ET$
+
+Models are run in the following order.
+This was exploratory, and the models are present only for sunny $\lambda Et$ as a talking point about model construction.
+
+1. `fit_sunny_et_0.1` Basic mixed model:
+    
+    `random = ~1|block/id`
+2. `fit_sunny_et_0.2` Unequal variance per time point added to `fit_sunny_et_0.1`: 
+    
+    `weights = varIdent(form= ~ 1 | t_fac)`
+3. `fit_sunny_et_0.3` Unequal variance for treatment added to `fit_sunny_et_0.1`: 
+    
+    `weights = varIdent(form= ~ 1 | treatment)`
+4. `fit_sunny_et_0.4` Unequal variances allowed per time point and per treatment to `fit_sunny_et_0.1`: 
+    
+    `weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac))` 
+5. `fit_sunny_et_full` Adds `AR(1)` correlation structure to `fit_sunny_et_0.4`: 
+    
+    `correlation = corAR1()`
+
+
+
+```{r, cache=T}
+dat_sunny_et = dat_sunny%>%
+  filter(id !=9) #this corresponds to soy block 3, which is really borked on this day (adds a silly amount of variability, unlike block 1 and 2)
+dat_sunny_et = as.data.frame(dat_sunny_et)
+dat_sunny_et =droplevels(dat_sunny_et)
+
+fit_sunny_et_0.1 = lme(lamet.ave ~ treatment*t_fac,
+              random = ~1|block/id,
+              data=dat_sunny_et)
+
+
+
+# Weight by time
+fit_sunny_et_0.2 = lme(lamet.ave ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | t_fac),
+              random = ~1|block/id,
+              data=dat_sunny_et)
+
+# Weight by treatment
+fit_sunny_et_0.3 = lme(lamet.ave ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | treatment),
+              random = ~1|block/id,
+              data=dat_sunny_et)
+
+# Weight by both
+
+fit_sunny_et_0.4 = lme(lamet.ave ~ treatment*t_fac,
+              weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+              random = ~1|block/id,
+              control = ctrl,
+              data=dat_sunny_et)
+
+
+# add ar(1)
+fit_sunny_et_full = lme(lamet.ave ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corAR1(),
+            control = ctrl,
+            data=dat_sunny_et)
+
+# 
+```
+
+```{r}
+dat_sunny_et_0.1_res = dat_sunny_et%>%
+  mutate(res=residuals(fit_sunny_et_0.1, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_et_0.1))
+
+dat_sunny_et_0.2_res = dat_sunny_et%>%
+  mutate(res=residuals(fit_sunny_et_0.2, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_et_0.2))
+
+dat_sunny_et_0.3_res = dat_sunny_et%>%
+  mutate(res=residuals(fit_sunny_et_0.3, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_et_0.3))
+
+dat_sunny_et_0.4_res = dat_sunny_et%>%
+  mutate(res=residuals(fit_sunny_et_0.4, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_et_0.4))
+
+
+dat_sunny_et_full_res = dat_sunny_et%>%
+  mutate(res=residuals(fit_sunny_et_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_et_full))  
+
+
+plot0.1 = ggplot(data=dat_sunny_et_0.1_res, aes(x=t, y=res, color=treatment))
+plot0.1 = plot0.1 + geom_point() + ggtitle("Lamet model 0.1 (Basic)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot0.1 = plot0.1 + scale_x_continuous(breaks=seq(0,24,1))
+plot0.1
+hist(residuals(fit_sunny_et_0.1, type="normalized"))
+
+plot0.2 = ggplot(data=dat_sunny_et_0.2_res, aes(x=t, y=res, color=treatment))
+plot0.2 = plot0.2 +geom_point() + ggtitle("Lamet model 0.2 (Unequal variance by time point)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot0.2 = plot0.2 + scale_x_continuous(breaks=seq(0,24,1))
+plot0.2
+hist(residuals(fit_sunny_et_0.2, type="normalized"))
+
+plot0.3 = ggplot(data=dat_sunny_et_0.3_res, aes(x=t, y=res, color=treatment))
+plot0.3 = plot0.3 +geom_point() + ggtitle("Lamet model 0.3 (Unequal variance by treatment)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot0.3 = plot0.3 + scale_x_continuous(breaks=seq(0,24,1))
+plot0.3
+hist(residuals(fit_sunny_et_0.3, type="normalized"))
+
+plot0.4 = ggplot(data=dat_sunny_et_0.4_res, aes(x=t, y=res, color=treatment))
+plot0.4 = plot0.4 +geom_point() + ggtitle("Lamet model 0.4 (Unequal variance by treatment and time point)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot0.4 = plot0.4 + scale_x_continuous(breaks=seq(0,24,1))
+plot0.4
+hist(residuals(fit_sunny_et_0.4, type="normalized"))
+
+
+plot_sunny_full = ggplot(data=dat_sunny_et_full_res, aes(x=t, y=res, color=treatment))
+plot_sunny_full = plot_sunny_full +geom_point() + ggtitle("Lamet sunny model Full (unequal variance and AR(1))") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_sunny_full = plot_sunny_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_sunny_full
+hist(residuals(fit_sunny_et_full, type="normalized"))
+qqnorm(residuals(fit_sunny_et_full, type="normalized"))
+qqline(residuals(fit_sunny_et_full, type="normalized"))
+
+AIC(fit_sunny_et_0.1)
+AIC(fit_sunny_et_0.2)
+AIC(fit_sunny_et_0.3)
+AIC(fit_sunny_et_0.4)
+AIC(fit_sunny_et_full)
+```
+
+```{r, fig.cap="Sunny day lamet estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_lamet = as.data.frame(emmeans(fit_sunny_et_full, ~ treatment*t_fac))
+means_lamet$t_fac = as.numeric(as.character(means_lamet$t_fac))
+
+plot_lamet = ggplot(data=means_lamet, aes(x=t_fac, y=emmean, color=treatment))
+plot_lamet = plot_lamet + geom_point() + xlab("Time Point (Hour)") + ylab("Lamet")
+plot_lamet = plot_lamet + scale_x_continuous(breaks=seq(0,24,1))
+plot_lamet = plot_lamet + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_lamet
+```
+
+\pagebreak
+
+### H
+
+```{r,eval = FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+dat_sunny_h = dat_sunny%>%
+  filter(id !=9)
+dat_sunny_h = as.data.frame(dat_sunny_h)
+
+
+fit_sunny_H_0.1 = lme(h ~ treatment*t_fac,
+              random = ~1|block/id,
+              data=dat_sunny)
+
+
+
+# Weight by time
+fit_sunny_H_0.2 = lme(h ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | t_fac),
+              random = ~1|block/id,
+              data=dat_sunny)
+
+# Weight by treatment
+fit_sunny_H_0.3 = lme(h ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | treatment),
+              random = ~1|block/id,
+              data=dat_sunny)
+
+# Weight by both
+
+fit_sunny_H_0.4 = lme(h ~ treatment*t_fac,
+              weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+              random = ~1|block/id,
+              data=dat_sunny)
+
+
+# add ar(1)
+fit_sunny_H_full = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny)
+
+fit_sunny_H_full_int = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varIdent(form= ~ 1 | trt_time),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny)
+
+fit_sunny_H_full_int_full = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac),varIdent(form= ~ 1 | trt_time)),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny)
+
+
+
+fit_sunny_H_full_test = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny_h)
+
+fit_sunny_H_full_int_test = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varIdent(form= ~ 1 | trt_time),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny_h)
+
+#            
+dat_sunny_H_0.1_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny0.1, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny0.1))
+
+dat_sunny_H_0.2_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_0.2, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_0.2))
+
+dat_sunny_H_0.3_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_0.3, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_0.3))
+
+dat_sunny_H_0.4_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_0.4, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_0.4))
+
+
+dat_sunny_H_full_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full))
+
+dat_sunny_H_full_int_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_full_int, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full_int))
+
+dat_sunny_H_full_int_full_res = dat_sunny%>%
+  mutate(res=residuals(fit_sunny_H_full_int_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full_int_full)) 
+
+## tests with new dataframe
+
+dat_sunny_H_full_test_res = dat_sunny_h%>%
+  mutate(res=residuals(fit_sunny_H_full_test, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full_test))
+
+dat_sunny_H_full_int_test_res = dat_sunny_h%>%
+  mutate(res=residuals(fit_sunny_H_full_int_test, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full_int_test))
+
+
+
+plot0.1 = ggplot(data=dat_sunny_H_0.1_res, aes(x=t_fac, y=res, color=treatment))
+plot0.1 = plot0.1 +geom_point()
+plot0.1
+hist(residuals(fit_sunny_H_0.1, type="normalized"))
+
+plot0.2 = ggplot(data=dat_sunny_H_0.2_res, aes(x=t_fac, y=res, color=treatment))
+plot0.2 = plot0.2 +geom_point()
+plot0.2
+hist(residuals(fit_sunny_H_0.2, type="normalized"))
+
+plot0.3 = ggplot(data=dat_sunny_H_0.3_res, aes(x=t_fac, y=res, color=treatment))
+plot0.3 = plot0.3 +geom_point()
+plot0.3
+hist(residuals(fit_sunny_H_0.3, type="normalized"))
+
+plot0.4 = ggplot(data=dat_sunny_H_0.4_res, aes(x=t_fac, y=res, color=treatment))
+plot0.4 = plot0.4 +geom_point()
+plot0.4
+hist(residuals(fit_sunny_H_0.4, type="normalized"))
+
+
+plot_sunny_full = ggplot(data=dat_sunny_H_full_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full = plot_sunny_full +geom_point()
+plot_sunny_full
+hist(residuals(fit_sunny_H_full, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full, type="normalized"))
+qqline(residuals(fit_sunny_H_full, type="normalized"))
+
+plot_sunny_full_int = ggplot(data=dat_sunny_H_full_int_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full_int = plot_sunny_full_int +geom_point()
+plot_sunny_full_int
+hist(residuals(fit_sunny_H_full_int, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full_int, type="normalized"))
+qqline(residuals(fit_sunny_H_full_int, type="normalized"))
+
+plot_sunny_full_int_full = ggplot(data=dat_sunny_H_full_int_full_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full_int_full = plot_sunny_full_int_full +geom_point()
+plot_sunny_full_int_full
+hist(residuals(fit_sunny_H_full_int_full, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full_int_full, type="normalized"))
+qqline(residuals(fit_sunny_H_full_int_full, type="normalized"))
+
+## tests
+
+## this is the best fit by far, removed the offending 
+plot_sunny_full_test = ggplot(data=dat_sunny_H_full_test_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full_test = plot_sunny_full_test +geom_point()
+plot_sunny_full_test
+hist(residuals(fit_sunny_H_full_test, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full_test, type="normalized"))
+qqline(residuals(fit_sunny_H_full_test, type="normalized"))
+###
+
+
+plot_sunny_full_int_test = ggplot(data=dat_sunny_H_full_int_test_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full_int_test = plot_sunny_full_int_test +geom_point()
+plot_sunny_full_int_test
+hist(residuals(fit_sunny_H_full_int_test, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full_int_test, type="normalized"))
+qqline(residuals(fit_sunny_H_full_int_test, type="normalized"))
+```
+
+```{r, cache=T}
+dat_sunny_h = dat_sunny%>%
+  filter(id !=9)
+dat_sunny_h = as.data.frame(dat_sunny_h)
+
+
+fit_sunny_H_full = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_sunny_h)
+```
+
+```{r}
+dat_sunny_H_full_res = dat_sunny_h%>%
+  mutate(res=residuals(fit_sunny_H_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_H_full))
+
+plot_sunny_full = ggplot(data=dat_sunny_H_full_res, aes(x=t, y=res, color=treatment))
+plot_sunny_full = plot_sunny_full +geom_point()+ ggtitle("Normalized residuals (H sunny full model)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_sunny_full = plot_sunny_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_sunny_full
+hist(residuals(fit_sunny_H_full, type="normalized"))
+qqnorm(residuals(fit_sunny_H_full, type="normalized"))
+qqline(residuals(fit_sunny_H_full, type="normalized"))
+```
+
+
+```{r, fig.cap="Sunny day H estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_h = as.data.frame(emmeans(fit_sunny_H_full, ~ treatment*t_fac))
+means_h$t_fac = as.numeric(as.character(means_h$t_fac))
+
+plot_h = ggplot(data=means_h, aes(x=t_fac, y=emmean, color=treatment))
+plot_h = plot_h + geom_point()+ xlab("Time Point (Hour)") + ylab("H")
+plot_h = plot_h + scale_x_continuous(breaks=seq(0,24,1))
+plot_h = plot_h + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_h
+```
+
+\pagebreak
+
+### $G_0$
+
+```{r,eval = FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+dat_sunny_g0 = dat_sunny%>%
+  filter(id %in% c(1, 2, 4, 6, 8, 9))
+dat_sunny_g0 = as.data.frame(dat_sunny_g0)
+
+fit_sunny_G0_0.1 = lme(g0 ~ treatment*t_fac,
+              random = ~1|block/id,
+              control = ctrl,
+              data=dat_sunny_g0)
+
+
+
+# Weight by time
+fit_sunny_G0_0.2 = lme(g0 ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | t_fac),
+              random = ~1|block/id,
+              control = ctrl,
+              data=dat_sunny_g0)
+
+# Weight by treatment
+fit_sunny_G0_0.3 = lme(g0 ~ treatment*t_fac,
+              weights = varIdent(form= ~ 1 | treatment),
+              random = ~1|block/id,
+              control = ctrl,
+              data=dat_sunny_g0)
+
+# Weight by both
+
+fit_sunny_G0_0.4 = lme(g0 ~ treatment*t_fac,
+              weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+              random = ~1|block/id,
+              control = ctrl,
+              data=dat_sunny_g0)
+
+
+# add ar(1)
+fit_sunny_G0_full = lme(g0 ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corAR1(),
+            control = ctrl,
+            data=dat_sunny_g0)
+
+# # add treatment*time weight (doesn't run)
+# fit_sunny_G0_full_int = lme(g0 ~ treatment*t_fac,
+#             random = ~ 1 | id,
+#             weights = varIdent(form= ~ 1 | trt_time),
+#             correlation = corARMA(p=1),
+#             control = ctrl,
+#             data=dat_sunny_g0)
+# 
+# fit_sunny_G0_full_int_full = lme(g0 ~ treatment*t_fac,
+#             random = ~ 1 | block/id,
+#             weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac),varIdent(form= ~ 1 | trt_time)),
+#             correlation = corARMA(p=1),
+#             control = ctrl,
+#             data=dat_sunny)
+
+
+
+#            
+dat_sunny_G0_0.1_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_0.1, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_0.1))
+
+dat_sunny_G0_0.2_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_0.2, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_0.2))
+
+dat_sunny_G0_0.3_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_0.3, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_0.3))
+
+dat_sunny_G0_0.4_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_0.4, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_0.4))
+
+
+dat_sunny_G0_full_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_full))  
+
+
+plot0.1 = ggplot(data=dat_sunny_G0_0.1_res, aes(x=t_fac, y=res, color=treatment))
+plot0.1 = plot0.1 +geom_point()
+plot0.1
+hist(residuals(fit_sunny_G0_0.1, type="normalized"))
+
+plot0.2 = ggplot(data=dat_sunny_G0_0.2_res, aes(x=t_fac, y=res, color=treatment))
+plot0.2 = plot0.2 +geom_point()
+plot0.2
+hist(residuals(fit_sunny_G0_0.2, type="normalized"))
+
+plot0.3 = ggplot(data=dat_sunny_G0_0.3_res, aes(x=t_fac, y=res, color=treatment))
+plot0.3 = plot0.3 +geom_point()
+plot0.3
+hist(residuals(fit_sunny_G0_0.3, type="normalized"))
+
+plot0.4 = ggplot(data=dat_sunny_G0_0.4_res, aes(x=t_fac, y=res, color=treatment))
+plot0.4 = plot0.4 +geom_point()
+plot0.4
+hist(residuals(fit_sunny_G0_0.4, type="normalized"))
+
+
+plot_sunny_full = ggplot(data=dat_sunny_G0_full_res, aes(x=t_fac, y=res, color=treatment))
+plot_sunny_full = plot_sunny_full +geom_point()
+plot_sunny_full
+hist(residuals(fit_sunny_G0_full, type="normalized"))
+qqnorm(residuals(fit_sunny_G0_full, type="normalized"))
+qqline(residuals(fit_sunny_G0_full, type="normalized"))
+```
+
+
+```{r, cache=T}
+dat_sunny_g0 = dat_sunny%>%
+  filter(id %in% c(1, 2, 4, 6, 8, 9))
+dat_sunny_g0 = as.data.frame(dat_sunny_g0)
+
+fit_sunny_G0_full = lme(g0 ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corAR1(),
+            control = ctrl,
+            data=dat_sunny_g0)
+```
+
+```{r}
+dat_sunny_G0_full_res = dat_sunny_g0%>%
+  mutate(res=residuals(fit_sunny_G0_full, type="normalized"))%>%
+  mutate(pred=predict(fit_sunny_G0_full))  
+
+plot_sunny_full = ggplot(data=dat_sunny_G0_full_res, aes(x=t, y=res, color=treatment))
+plot_sunny_full = plot_sunny_full +geom_point()+geom_point()+ ggtitle("Normalized residuals (G0 sunny full model)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_sunny_full = plot_sunny_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_sunny_full
+hist(residuals(fit_sunny_G0_full, type="normalized"))
+qqnorm(residuals(fit_sunny_G0_full, type="normalized"))
+qqline(residuals(fit_sunny_G0_full, type="normalized"))
+```
+
+
+```{r, fig.cap= "Sunny day G0 estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_g0 = as.data.frame(emmeans(fit_sunny_G0_full, ~ treatment*t_fac))
+means_g0$t_fac = as.numeric(as.character(means_g0$t_fac))
+
+
+plot_g0 = ggplot(data=means_g0, aes(x=t_fac, y=emmean, color=treatment))
+plot_g0 = plot_g0 + geom_point()+ xlab("Time Point (Hour)") + ylab("G0")
+plot_g0 = plot_g0 + scale_x_continuous(breaks=seq(0,24,1))
+plot_g0 = plot_g0 + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_g0
+```
+
+\pagebreak
+
+### $R_n$
+
+$R_n$ isn't replicated over by treatment, there are no statistics required here.
+
+```{r}
+ggplot(dat_sunny) +
+ aes(x = t, y = rn, colour = treatment) +
+ geom_point(size = 1L) +
+ scale_color_hue() +
+ theme_minimal()
+```
+
+
+\pagebreak
+
+## Cloudy
+
+### $\lambda ET$
+
+```{r, cache=T}
+dat_cloudy_et = dat_cloudy#%>%
+  # filter(id !=9) #this corresponds to soy block 3, which is really borked on this day (adds a silly amount of variability, unlike block 1 and 2)
+dat_cloudy_et = as.data.frame(dat_cloudy_et)
+dat_cloudy_et =droplevels(dat_cloudy_et)
+
+# add ar(1)
+fit_cloudy_et_full = lme(lamet.ave ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corAR1(),
+            control = ctrl,
+            data=dat_cloudy_et)
+```
+
+```{r}
+dat_cloudy_et_full_res = dat_cloudy_et%>%
+  mutate(res=residuals(fit_cloudy_et_full, type="normalized"))%>%
+  mutate(pred=predict(fit_cloudy_et_full))  
+
+plot_cloudy_full = ggplot(data=dat_cloudy_et_full_res, aes(x=t, y=res, color=treatment))
+plot_cloudy_full = plot_cloudy_full +geom_point()+ ggtitle("Normalized residuals (Lamet cloudy full model)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_cloudy_full = plot_cloudy_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_cloudy_full
+hist(residuals(fit_cloudy_et_full, type="normalized"))
+qqnorm(residuals(fit_cloudy_et_full, type="normalized"))
+qqline(residuals(fit_cloudy_et_full, type="normalized"))
+```
+
+```{r, fig.cap="Cloudy day lamet estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_cloudy_lamet = as.data.frame(emmeans(fit_cloudy_et_full, ~ treatment*t_fac))
+means_cloudy_lamet$t_fac = as.numeric(as.character(means_cloudy_lamet$t_fac))
+
+
+plot_cloudy_lamet = ggplot(data=means_cloudy_lamet, aes(x=t_fac, y=emmean, color=treatment))
+plot_cloudy_lamet = plot_cloudy_lamet + geom_point()+ xlab("Time Point (Hour)") + ylab("Lamet")
+plot_cloudy_lamet = plot_cloudy_lamet + scale_x_continuous(breaks=seq(0,24,1))
+plot_cloudy_lamet = plot_cloudy_lamet + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_cloudy_lamet
+```
+
+\pagebreak
+
+### H
+
+```{r, cache=T}
+dat_cloudy_h = dat_cloudy#%>%
+  # filter(id !=9)
+dat_cloudy_h = as.data.frame(dat_cloudy_h)
+
+
+fit_cloudy_H_full = lme(h ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corARMA(p=1),
+            control = ctrl,
+            data=dat_cloudy_h)
+```
+
+```{r}
+dat_cloudy_H_full_res = dat_cloudy_h%>%
+  mutate(res=residuals(fit_cloudy_H_full, type="normalized"))%>%
+  mutate(pred=predict(fit_cloudy_H_full))
+
+plot_cloudy_full = ggplot(data=dat_cloudy_H_full_res, aes(x=t, y=res, color=treatment))
+plot_cloudy_full = plot_cloudy_full +geom_point()+ ggtitle("Normalized residuals (H cloudy full model)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_cloudy_full = plot_cloudy_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_cloudy_full
+hist(residuals(fit_cloudy_H_full, type="normalized"))
+qqnorm(residuals(fit_cloudy_H_full, type="normalized"))
+qqline(residuals(fit_cloudy_H_full, type="normalized"))
+```
+
+
+```{r, fig.cap="cloudy day H estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_h = as.data.frame(emmeans(fit_cloudy_H_full, ~ treatment*t_fac))
+means_h$t_fac = as.numeric(as.character(means_h$t_fac))
+
+plot_h = ggplot(data=means_h, aes(x=t_fac, y=emmean, color=treatment))
+plot_h = plot_h + geom_point()+ xlab("Time Point (Hour)") + ylab("H")
+plot_h = plot_h + scale_x_continuous(breaks=seq(0,24,1))
+plot_h = plot_h + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_h
+```
+
+\pagebreak
+
+### $G_0$
+
+```{r, cache=T}
+dat_cloudy_g0 = dat_cloudy%>%
+  filter(id %in% c(1, 2, 4, 6, 8, 9))
+dat_cloudy_g0 = as.data.frame(dat_cloudy_g0)
+
+fit_cloudy_G0_full = lme(g0 ~ treatment*t_fac,
+            random = ~ 1 | block/id,
+            weights = varComb(varIdent(form= ~ 1 | treatment),varIdent(form= ~ 1 | t_fac)),
+            correlation = corAR1(),
+            control = ctrl,
+            data=dat_cloudy_g0)
+```
+
+```{r}
+dat_cloudy_G0_full_res = dat_cloudy_g0%>%
+  mutate(res=residuals(fit_cloudy_G0_full, type="normalized"))%>%
+  mutate(pred=predict(fit_cloudy_G0_full))  
+
+plot_cloudy_full = ggplot(data=dat_cloudy_G0_full_res, aes(x=t, y=res, color=treatment))
+plot_cloudy_full = plot_cloudy_full +geom_point()+ ggtitle("Normalized residuals (G0 cloudy full model)") +xlab("Time Point (Hour)") + ylab("Normalized residuals")
+plot_cloudy_full = plot_cloudy_full + scale_x_continuous(breaks=seq(0,24,1))
+plot_cloudy_full
+hist(residuals(fit_cloudy_G0_full, type="normalized"))
+qqnorm(residuals(fit_cloudy_G0_full, type="normalized"))
+qqline(residuals(fit_cloudy_G0_full, type="normalized"))
+```
+
+
+```{r, fig.cap= "Cloudy day G0 estimates and 95% CI. Note that the CI vaires by time and treatment, which is representative of the data."}
+means_g0 = as.data.frame(emmeans(fit_cloudy_G0_full, ~ treatment*t_fac))
+means_g0$t_fac = as.numeric(as.character(means_g0$t_fac))
+
+plot_g0 = ggplot(data=means_g0, aes(x=t_fac, y=emmean, color=treatment))
+plot_g0 = plot_g0 + geom_point()+ xlab("Time Point (Hour)") + ylab("G0")
+plot_g0 = plot_g0 + scale_x_continuous(breaks=seq(0,24,1))
+plot_g0 = plot_g0 + geom_errorbar(aes(ymin=emmean-SE, ymax=emmean+SE))
+plot_g0
+```
+
+\pagebreak
+
+### $R_n$
+
+$R_n$ isn't replicated over by treatment, there are no statistics required here.
+
+```{r}
+ggplot(dat_cloudy) +
+ aes(x = t, y = rn, colour = treatment) +
+ geom_point(size = 1L) +
+ scale_color_hue() +
+ theme_minimal()
+```
+
+
+# Averaged diurnal differences between Corn and IC (fig 3 from Bernacchi 2003)
+
+
+
+# Daily $\lambda ET$ (fig 7 from Bernacchi 2003)

@@ -1,0 +1,1040 @@
+---
+title: "A Maize-Soybean Intercrop Canopy and its Influence on Yield and Water-Use Efficiency."
+author: "Elena A. Pelech and Brendan C.S. Alexander"
+date: "November 19, 2018"
+output:
+  pdf_document: default
+  word_document: default
+subtitle: "Master code document for the project"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing the yield data and making boxplots
+**Note: Code that starts with a "#" is commented out. It is not meant to be run.**
+
+### Corn and IC corn
+
+This code reads-in the yield data and creates a new dataset (corn.yield) that only has corn and IC observations.
+Note that I do create new names for the columns.
+
+There is a linear mixed model fit, however the summary is not displayed.
+The model is:
+$$\underbrace{y_{ij}}_9=\underbrace{\mu}_1 + \underbrace{\tau_i}_2 + \underbrace{b_j}_2 +\underbrace{\epsilon_{ij}}_4$$
+
+where $y_{ij}$ is the yield of the $i^{th}$ treatment in the $j^{th}$ block, $\tau_i$ is treatment level $i$, $b_j$ is block number $j$, and $\epsilon_{ij}$ is the error for the $i^{th}$ treatment in the $j^{th}$ block.
+
+"ggsave" saves the boxplot as a .png file to wherever your working directory is.
+
+```{r cy, fig.cap="Corn yield comparison between the corn-only treatment plot and the intercropped treatmen in $\\frac{kg}{m^2}$. IC stands for intercrop.",message=FALSE,warning=FALSE}
+library(nlme)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+ # import the data
+yield <- read.csv("yield.csv")
+names(yield) <- c("crop","block","subyield","plot.yield.g","plot.yield.kg","m2.yield.kg","rfr.g","rfr.kg")
+
+
+
+corn.yield <- yield%>%
+  filter(crop%in%c('corn','ic_corn'))
+corn.yield <- droplevels(corn.yield)
+
+corn.yield.fit <- lme(m2.yield.kg~crop,random=~1|block,data = corn.yield)
+
+plot1 <-ggplot(corn.yield,aes(x=crop,y=m2.yield.kg))
+plot1 <- plot1+geom_boxplot()
+plot1 <- plot1+theme_bw()
+plot1 <- plot1+labs(title='Corn yield comparison between the corn-only treatment \n plot and the intercropped treatment.')+
+                        xlab('Crop treatment: Corn and intercropped (Corn)')+
+                        ylab(expression(paste("Corn yield in ",kg," ", m^{-2})))+
+  scale_y_continuous(breaks = pretty(corn.yield$m2.yield.kg,5))
+plot1 <- plot1+stat_summary(fun.y=mean, colour="green", geom="point", 
+               shape=18, size=3,show.legend = FALSE)
+plot1
+
+ggsave("ic_corn.png", device = "png", width = 9, height =5, units = c("in"),dpi = 900)
+```
+
+### Soy and IC soy
+
+This code does the same thing, just for soy and IC soy.
+
+```{r sy, fig.cap="Soy yield comparison between the soy-only treatment plot and the intercropped treatment in $\\frac{kg}{m^2}$. IC stands for intercrop.",message=FALSE,warning=FALSE}
+soy.yield <- yield%>%
+  filter(crop%in%c('soy','ic_soy'))
+soy.yield <- droplevels(soy.yield)
+
+soy.yield.fit <- lme(m2.yield.kg~crop,random=~1|block,data = soy.yield)
+soy.p <- summary(soy.yield.fit)$tTable[2,5]
+plot2 <-ggplot(soy.yield,aes(x=crop,y=m2.yield.kg))
+plot2 <- plot2+geom_boxplot()
+plot2 <- plot2+theme_bw()
+plot2 <- plot2+labs(title='Soy yield comparison between the soy-only \n treatment plot and the intercropped treatment.')+
+                        xlab('Crop treatment: Soy and intercropped (Soy)')+
+                        ylab(expression(paste("Soy yield in ",kg," ", m^{-2})))+
+  scale_y_continuous(breaks = pretty(soy.yield$m2.yield.kg,5))
+plot2 <- plot2+stat_summary(fun.y=mean, colour="green", geom="point", 
+               shape=18, size=3,show.legend = FALSE)
+plot2
+ggsave("ic_soy.png", device = "png", width = 9, height =5, units = c("in"),dpi = 900)
+```
+
+
+## Overyielding data manipulation and bootstrap resampling
+
+The "yield" dataset is modified to only include certain columns (select statement), then the data frame is changed from long to wide format (spread statement), and finally I calculate overyielding (mutate statement):
+
+$$oy=\frac{Yield_{ic-corn}}{Yield_{corn}}+\frac{Yield_{ic-soy}}{Yield_{soy}}$$
+
+Note that with only 3 blocks we only have 3 measures for overyielding total.
+We have no reason to expect that overyielding will be normally distributed, but just for the hell of it I have an intercept-only model here.
+The intercept-only model will estimate the average overyielding and perform a two-sided test to determine if that average (the intercept) is different from zero.
+
+What we really want is to know if the intercept is significantly greater than 1.
+A 90% confidence interval will let us essentially do a one sided t-test at $\alpha=0.05$.
+(Spoiler: not significant).
+
+```{r}
+over.yield <- yield%>%
+  select(crop,block,m2.yield.kg)%>%
+  spread(key=crop,value=m2.yield.kg)%>%
+  mutate(oy=ic_corn/corn+ic_soy/soy)
+
+oy.fit <- lm(oy~1,data=over.yield)
+confint(oy.fit,level = 0.9)
+```
+
+Because our confidence interval contains values $\leq1$ we reject the alternative hypothesis and conclude that we have no evidence for overyielding.
+
+**Note that the et data frame is being setup here at the same time**
+
+```{r}
+# import the data
+et <- read.csv('wue.csv')
+et <- head(et,-3)
+et <- droplevels(et)
+
+et <- et%>%
+  #RN
+  mutate(rnsw=(rnsw_1+rnsw_2)/2)%>%
+  mutate(senssw=(senssw_1+senssw_2)/2)%>%
+  mutate(rnlw=(rnlw_1+rnlw_2)/2)%>%
+  mutate(senslw=(senslw_1+senslw_2)/2)%>%
+  mutate(netsw=rnsw/senssw*1000)%>%
+  mutate(netlw=rnlw/senslw*1000)%>%
+  mutate(rn=netsw+netlw)%>%
+  #G0
+  mutate(shfp=(shfp_1+shfp_2+shfp_3+shfp_4)/4)%>%
+  mutate(cal=(cal_1+cal_2+cal_3+cal_4)/4)%>%
+  mutate(g80=shfp*cal)%>%
+  mutate(c=(c_1+c_2+c_3+c_4)/4)%>%
+  mutate(dz=(dz_1+dz_2+dz_3+dz_4)/4)%>%
+  mutate(dT=(dT_1+dT_2+dT_3+dT_4)/4)%>%
+  mutate(dt=(dt_1+dt_2+dt_3+dt_4)/4)%>%
+  mutate(g0=g80+c*dz*(dT/dt))%>%
+  #H
+  mutate(pa=(pa_1+pa_2)/2)%>%
+  mutate(cp=(cp_1+cp_2)/2)%>%
+  mutate(ttat=(ttat_1+ttat_2)/2)%>%
+  mutate(tair=(tair_1+tair_2)/2)%>%
+  mutate(ra=(ra_1+ra_2)/2)%>%
+  mutate(h=pa*cp*((ttat-tair)/ra))%>%
+  mutate(lamet.ave=rn-g0-h)%>%
+  mutate(et.ave=lamet.ave/lam*1800)
+  
+# split timestamp column into smaller components
+month_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",1)
+day_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",2)
+yrtime_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",3)
+yr_split <- sapply(strsplit(yrtime_split,split = ' '),"[",1)
+time_split <- sapply(strsplit(yrtime_split,split = ' '),"[",2)
+t_1 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",1))
+t_2 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",2))/60
+
+#create a new dataframe
+et1 <- cbind(yr_split,month_split,day_split,time_split,t_1,t_2,et)
+```
+
+```{r}
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gtable)
+library(grid)
+library(data.table)
+et1$block <- as.factor(et1$block)
+# dat1$time_split <- as.numeric(as.character(dat1$time_split))
+
+dat1.1 <- et1%>%
+  mutate(t=t_1+t_2)%>%#time in hours
+  mutate(sec=t*60*60) #time in seconds #cumulative time in seconds
+
+dat1.1 <- data.table(dat1.1)
+dat1.1[, seccum := cumsum(dt_1), by=list(treatment, block)]
+
+dat2 <- dat1.1%>%
+  mutate(cumdays=seccum*1.1574*10^-5)%>%
+  mutate(dayofyear=cumdays+198)%>%
+  filter(dayofyear<=250)
+
+dat3 <- dat2%>%
+  filter(dayofyear<=250)%>%
+  group_by(treatment,block)%>%
+  summarise(sum(et.ave))
+
+dat3 <- as.data.frame(dat3)
+# dat3 <- dat3[-1,]
+names(dat3) <- c('treatment','block','et')
+```
+
+```{r over yield bootstrap, fig.cap="Histrogram of 10000 bootstrapped observations for the relative yield of the intercrop treatment. The mean and mean are both approximately 1.1, and the majority of observations indicate overyielding."}
+fullyield <- read.csv("yieldfull.csv")
+
+temp.dat <- data.frame(corn=as.numeric(),
+                       soy=as.numeric(),
+                       ic_soy=as.numeric(),
+                       ic_corn=as.numeric())
+
+temp.et <- data.frame(corn.et=as.numeric(),
+                       soy.et=as.numeric(),
+                       ic.et=as.numeric()) 
+
+oy.boot <- data.frame(overyield=as.numeric())
+oy.et.boot <- data.frame(overyield.et=as.numeric(),
+                         overyield.corn.et=as.numeric(),
+                         overyield.soy.et=as.numeric(),
+                         yield.corn.et=as.numeric(),
+                         yield.soy.et=as.numeric(),
+                         yield.ic.et=as.numeric(),
+                         yield.ic.corn.et=as.numeric(),
+                         yield.ic.soy.et=as.numeric(),
+                         yield.ic.cornonly.et=as.numeric(),
+                         yield.ic.rev.cornonly.et=as.numeric())
+
+nrun <- 10000
+for (i in 1:nrun){
+  for(j in 1:3){
+  b <- sample(1:3,1)
+  corn <- fullyield%>%
+    filter(crop=='corn' & block==b)
+  c <- mean(c(sample(x = corn$yield,size = 2,replace = T)))
+  
+    soy <- fullyield%>%
+    filter(crop=='soy' & block==b)
+  s <- mean(c(sample(x = soy$yield,size = 2,replace = T)))
+  
+    ic_corn <- fullyield%>%
+    filter(crop=='ic_corn' & block==b)
+  ic <- mean(c(sample(x = ic_corn$yield,size = 2,replace = T)))
+  
+    ic_soy <- fullyield%>%
+    filter(crop=='ic_soy' & block==b)
+  is <- mean(c(sample(x = ic_soy$yield,size = 2,replace = T)))
+  
+  corn.et <- dat3%>%
+    filter(treatment=='corn' & block==b)
+  ic.et <- dat3%>%
+    filter(treatment=='ic' & block==b) 
+  s.et <- dat3%>%
+    filter(treatment=='soy' & block==b) 
+  
+  temp.dat[j,1] <- c
+  temp.dat[j,2] <- s
+  temp.dat[j,3] <- is
+  temp.dat[j,4] <- ic
+  
+  temp.et[j,1] <- corn.et[1,3]
+  temp.et[j,2] <- s.et[1,3]
+  temp.et[j,3] <- ic.et[1,3]
+  
+  }
+  oy <- sum(temp.dat$ic_corn)/sum(temp.dat$corn)+sum(temp.dat$ic_soy)/sum(temp.dat$soy)
+  oy.boot[i,1] <- oy
+  
+  # Ignore these, I was playing around with other ways to visualize the data.
+  # I don't think any of our final graphs were made from these mutations
+  oy.et <-oy/sum(temp.et$ic.et)-(1/sum(temp.et$corn.et)+1/sum(temp.et$soy.et))/2
+  oy.et.boot[i,1] <- oy.et
+  oy.et.boot[i,2] <- oy/sum(temp.et$ic.et)-1/sum(temp.et$corn.et)
+  oy.et.boot[i,3] <- oy/sum(temp.et$ic.et)-1/sum(temp.et$soy.et)
+  oy.et.boot[i,4] <- sum(temp.dat$corn)/sum(temp.et$corn.et)
+  oy.et.boot[i,5] <- sum(temp.dat$soy)/sum(temp.et$soy.et)
+  oy.et.boot[i,6] <- sum(temp.dat$ic_soy,temp.dat$ic_corn)/sum(temp.et$ic.et)
+  oy.et.boot[i,7] <-sum(temp.dat$ic_soy,temp.dat$ic_corn)/sum(temp.et$ic.et)-sum(temp.dat$corn)/sum(temp.et$corn.et)
+  oy.et.boot[i,8] <-sum(temp.dat$ic_soy,temp.dat$ic_corn)/sum(temp.et$ic.et)-sum(temp.dat$soy)/sum(temp.et$soy.et)
+  oy.et.boot[i,9] <-sum(temp.dat$ic_corn)/sum(temp.et$ic.et)-sum(temp.dat$corn)/sum(temp.et$corn.et)
+  oy.et.boot[i,10] <-sum(temp.et$ic.et)/sum(temp.dat$ic_corn)-sum(temp.et$corn.et)/sum(temp.dat$corn)
+}
+# hist(oy.boot$overyield)
+
+ploth <- ggplot(oy.boot,aes(x=overyield))
+ploth <-ploth+ geom_histogram(color="black", fill="white")
+ploth <- ploth+theme_bw()
+ploth <- ploth+labs(title='Histogram of bootstrapped relative yields for the intercrop treatment.')+
+                        xlab('Relative yield')+
+                        ylab("Count")
+ploth <- ploth+geom_vline(xintercept = 1,size=1,color="green",linetype = "dashed")
+ploth
+
+ggsave("ry_hist.png", device = "png", width = 9, height =5, units = c("in"),dpi = 900)
+p<- sum(oy.boot$overyield<=1)/nrun
+# p
+# median(oy.boot$overyield)
+# mean(oy.boot$overyield)
+
+```
+
+## ET graphs
+
+ET throughout the summer for each treatment
+```{r}
+ggplot(data = dat2) +
+  aes(x = dayofyear, y = et.ave, color = treatment) +
+  geom_point() +
+  theme_minimal()
+```
+
+Cumulative ET
+
+```{r, fig.cap="ET integrated over the season for each treatent-block combination using Riemann Sums. (ET in $\\frac{kg}{m^2 season}$)"}
+dat3$treatment <- factor(dat3$treatment, levels = c("ic","corn","soy"))
+plot4 <- ggplot(data=dat3,aes(x=treatment,y = et))
+plot4 <- plot4+geom_boxplot()
+plot4 <- plot4+theme_bw()
+plot4 <- plot4+labs(title='ET integrated over the season for each treatent-block \n combination using Riemann Sums.')+
+                        xlab('Crop treatment: Soy, corn, and intercrop')+
+                        ylab("cET")+
+  scale_y_continuous(breaks = pretty(dat3$et,5))
+plot4 <- plot4+stat_summary(fun.y=mean, colour="green", geom="point", 
+               shape=18, size=3)
+plot4
+ggsave("cet.png", device = "png", width = 9, height =5, units = c("in"),dpi = 900)
+
+
+fit1 <- lme(et~treatment,random=~1|block,dat3)
+# levene.test(y = dat3$et,group = dat3$treatment)
+```
+
+## Sunny vs cloudy plots
+
+I don't have any comments here yet, but you came up with a lot of this code so I imagine you might not need additional comments here.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(esquisse)
+library(ggthemes)
+# 
+#  # import the data
+dat <- read.csv('wue.csv')
+# 
+# split timestamp column into smaller components
+month_split <- sapply(strsplit(as.character(dat$timestamp),split = '/'),"[",1)
+day_split <- sapply(strsplit(as.character(dat$timestamp),split = '/'),"[",2)
+yrtime_split <- sapply(strsplit(as.character(dat$timestamp),split = '/'),"[",3)
+yr_split <- sapply(strsplit(yrtime_split,split = ' '),"[",1)
+time_split <- sapply(strsplit(yrtime_split,split = ' '),"[",2)
+t_1 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",1))
+t_2 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",2))/60
+# 
+# #create a new dataframe
+dat1 <- cbind(yr_split,month_split,day_split,time_split,t_1,t_2,dat)
+dat1$block <- as.factor(dat1$block)
+dat1$time_split <- as.numeric(as.character(dat1$time_split))
+dat2 <- dat1%>%
+mutate(lamet=as.numeric(as.character(lamet)))%>%
+mutate(et=lamet/lam*1800)%>%
+group_by(treatment,block)%>%
+summarise(sum(et))
+dat2 <- as.data.frame(dat2)
+dat2 <- dat2[-1,]
+names(dat2) <- c('treatment','block','et')
+# ```{r, fig.cap="ET integrated over the season for each treatent-block combination using Riemann Sums. (ET in mm season^-1"}
+ggplot(data = dat2) +
+  aes(x = treatment, y = et) +
+  geom_boxplot(fill = "#ffffff") +
+  labs(x = "Cropping System",
+       y = "cET") +
+  theme_par()
+
+
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gtable)
+library(grid)
+library(data.table)
+# 
+dat1.1 <- dat1%>%
+mutate(t=t_1+t_2)%>%#time in hours
+mutate(sec=t*60*60)%>% #time in seconds #cumulative time in seconds
+mutate(g0_ave=(g0_1+g0_2+g0_3+g0_4)/4)%>%
+mutate(rn_ave=(rn_1+rn_2)/2)%>%
+mutate(h_ave=(h_1+h_2)/2)
+# 
+dat1.1 <- data.table(dat1.1)
+dat1.1[, seccum := cumsum(dt_1), by=list(treatment, block)]
+# 
+dat3 <- dat1.1%>%
+filter(month_split==9 & day_split==1)
+#### lam_ET cloudy ####
+ggplot(data = dat3) +
+  aes(x = t, y = lamet, color = treatment) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(lambda~"ET"~" "~(W%.%m^2))) +
+  theme_par()
+#### GO cloudy ####
+ggplot(data = dat3) +
+  aes(x = t, y = g0_ave, color = treatment) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(G[0]~" "~(W%.%m^2))) +
+  theme_par() 
+#### H cloudy ####
+ggplot(data = dat3) +
+  aes(x = t, y = h_ave, color = treatment) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("H"~" "~(W%.%m^2))) +
+  theme_par()
+#### Rn cloudy ####
+ggplot(data = dat3) +
+  aes(x = t, y = rn_ave, color = treatment) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(R[n]~" "~(W%.%m^2))) +
+  theme_par()
+
+ dat3.1 <- dat1.1%>%
+   filter(month_split==8 & day_split==31)
+ #### lam_ET sunny ####
+ ggplot(data = dat3.1) +
+   aes(x = t, y = lamet, color = treatment) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(lambda~"ET "~(W%.%m^2))) +
+   theme_par()
+ #### Rn sunny ####
+ ggplot(data = dat3.1) +
+   aes(x = t, y = rn_ave, color = treatment) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(R[n]~" "~(W%.%m^2))) +
+   theme_par()
+ #### H sunny ####
+ ggplot(data = dat3.1) +
+   aes(x = t, y = h_ave, color = treatment) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote("H"~" "~(W%.%m^2))) +
+   theme_par()
+ #### G0 sunny ####
+ ggplot(data = dat3.1) +
+   aes(x = t, y = g0_ave, color = treatment) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(G[0]~" "~(W%.%m^2))) +
+   theme_par()
+ 
+#### Brendan's Addition ####
+# import the data
+et <- read.csv('wue.csv')
+et <- head(et,-3)
+et <- droplevels(et)
+
+et <- et%>%
+  #RN
+  mutate(rnsw=(rnsw_1+rnsw_2)/2)%>%
+  mutate(senssw=(senssw_1+senssw_2)/2)%>%
+  mutate(rnlw=(rnlw_1+rnlw_2)/2)%>%
+  mutate(senslw=(senslw_1+senslw_2)/2)%>%
+  mutate(netsw=rnsw/senssw*1000)%>%
+  mutate(netlw=rnlw/senslw*1000)%>%
+  mutate(rn=netsw+netlw)%>%
+  #G0
+  mutate(shfp=(shfp_1+shfp_2+shfp_3+shfp_4)/4)%>%
+  mutate(cal=(cal_1+cal_2+cal_3+cal_4)/4)%>%
+  mutate(g80=shfp*cal)%>%
+  mutate(c=(c_1+c_2+c_3+c_4)/4)%>%
+  mutate(dz=(dz_1+dz_2+dz_3+dz_4)/4)%>%
+  mutate(dT=(dT_1+dT_2+dT_3+dT_4)/4)%>%
+  mutate(dt=(dt_1+dt_2+dt_3+dt_4)/4)%>%
+  mutate(g0=g80+c*dz*(dT/dt))%>%
+  #H
+  mutate(pa=(pa_1+pa_2)/2)%>%
+  mutate(cp=(cp_1+cp_2)/2)%>%
+  mutate(ttat=(ttat_1+ttat_2)/2)%>%
+  mutate(tair=(tair_1+tair_2)/2)%>%
+  mutate(ra=(ra_1+ra_2)/2)%>%
+  mutate(h=pa*cp*((ttat-tair)/ra))%>%
+  mutate(lamet.ave=rn-g0-h)%>%
+  mutate(et.ave=lamet.ave/lam*1800)
+  
+# split timestamp column into smaller components
+month_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",1)
+day_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",2)
+yrtime_split <- sapply(strsplit(as.character(et$timestamp),split = '/'),"[",3)
+yr_split <- sapply(strsplit(yrtime_split,split = ' '),"[",1)
+time_split <- sapply(strsplit(yrtime_split,split = ' '),"[",2)
+t_1 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",1))
+t_2 <- as.numeric(sapply(strsplit(time_split,split = ':'),"[",2))/60
+
+#create a new dataframe
+et1 <- cbind(yr_split,month_split,day_split,time_split,t_1,t_2,et)
+
+#### ####
+
+et1$block <- as.factor(et1$block)
+# dat1$time_split <- as.numeric(as.character(dat1$time_split))
+
+dat4 <- et1%>%
+  mutate(t=t_1+t_2)%>%#time in hours
+  mutate(sec=t*60*60) #time in seconds #cumulative time in seconds
+
+dat4 <- data.table(dat4)
+dat4[, seccum := cumsum(dt_1), by=list(treatment, block)]
+
+dat5 <- dat4%>%
+  mutate(cumdays=seccum/86400)%>% #1.1574*10^-5
+  mutate(dayofyear=cumdays+198)%>%
+  filter(dayofyear<=250)%>%
+  mutate(ind_sun=ifelse(rn>=500,1,0))%>%
+  mutate(dayofyear_rounded=floor(dayofyear))
+
+dat_cloudy <- dat5%>%
+filter(month_split==9 & day_split==1)
+
+dat_sunny <- dat5%>%
+   filter(month_split==8 & day_split==31)
+   
+dat6_list <- dat5%>%
+  filter(time_split=="12:00" & ind_sun==1)%>%
+  group_by(dayofyear_rounded)%>%
+  summarise(prop_sun=mean(ind_sun))
+dat6_list <- as.data.frame(dat6_list)
+
+dat6_list.1 <- as.data.frame(dat6_list)
+names(dat6_list.1) <- c("dayofyear_rounded","prop_sun")
+
+dat6_cl_noon <- anti_join(dat5,dat6_list)
+dim(dat6_cl_noon)
+dat6_su_noon <- semi_join(dat5,dat6_list)
+dim(dat6_su_noon)
+
+dat7_table <- dat5%>%
+  filter(sec %in% 32400:54000)%>%
+  group_by(dayofyear_rounded)%>%
+  summarise(prop_sun=mean(ind_sun))
+
+dat7_table <- as.data.frame(dat7_table)
+dat7_table30 <- dat7_table%>%
+  filter(prop_sun>0.3)
+
+dat7_cl_percent <- anti_join(dat5,dat7_table30)
+dim(dat7_cl_percent)
+dat7_su_percent <- semi_join(dat5,dat7_table30)
+dim(dat7_su_percent)
+
+anti_join(dat7_table30,dat6_list.1,by="dayofyear_rounded")
+anti_join(dat6_list.1,dat7_table30,by="dayofyear_rounded")
+
+#### Which days were sunny? ####
+# Looks like we could use something like >0.3 or something.
+# Notice how the Rn decreases as expected based on moving father away from the summer solstice. Neat!
+# Interesting: If proportion criteria set to >0.3 then the total number of sunny days are the same in the dat6 and dat7 arrays
+  # The dat6 and dat7 arrays are not identical though, they disagree on 10 days. Other than those 10 days, they agree.
+ggplot(data = dat7_table) +
+  aes(x = dayofyear_rounded, y = prop_sun) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Day of the year",
+       y = bquote("Proportion of measurements between 9am and 3pm that had  "~R[n]~" above 500.")) +
+  theme_par()
+
+#### ttat sunny ####
+
+ggplot(data = dat_sunny) +
+  aes(x = t, y = ttat, color = treatment) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("ttat")) +
+  theme_par()
+
+ dat3.1 <- dat1.1%>%
+   filter(month_split==8 & day_split==31)
+ 
+#### ttat cloudy ####
+ ggplot(data = dat_cloudy) +
+   aes(x = t, y = lamet, color = treatment) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote("ttat")) +
+   theme_par()
+ 
+ 
+ #### Averaged diurnal measures (sunny) (diff, corn-ic) dat 6 (noon Rn)####
+ 
+ dat_diurnal_s6 <- dat6_su_noon %>%
+   group_by(treatment, t)%>%
+   summarise(H=mean(h),
+             lamet = mean(lamet.ave),
+             G=mean(g0),
+             T=mean(ttat),
+             R=mean(rn))
+
+dat_diurnal_s6 <- as.data.frame(dat_diurnal_s6)
+
+dat_di_corn_s6 <- dat_diurnal_s6%>%
+  filter(treatment == "corn")
+
+dat_di_ic_s6 <- dat_diurnal_s6%>%
+  filter(treatment == "ic")
+
+Hdiff <- data.frame(Hdiff=as.numeric())
+etdiff <- data.frame(etdiff=as.numeric())
+Gdiff <- data.frame(Gdiff=as.numeric())
+Tdiff <- data.frame(Tdiff=as.numeric())
+Rdiff <- data.frame(Rdiff=as.numeric())
+
+for (i in 1:nrow(dat_di_corn_s6)){
+  Hdiff[i,1] <- dat_di_ic_s6[i,3]-dat_di_corn_s6[i,3]
+  etdiff[i,1] <- dat_di_ic_s6[i,4]-dat_di_corn_s6[i,4]
+  Gdiff[i,1] <- dat_di_ic_s6[i,5]-dat_di_corn_s6[i,5]
+  Tdiff[i,1] <- dat_di_ic_s6[i,6]-dat_di_corn_s6[i,6]
+  Rdiff[i,1] <- dat_di_ic_s6[i,7]-dat_di_corn_s6[i,7]
+}
+
+time <- dat_di_ic_s6$t
+diurnal_graph_data_s6 <- cbind(time,Hdiff,etdiff,Gdiff,Tdiff,Rdiff)
+
+
+#### H diurnral ####
+ggplot(data = diurnal_graph_data_s6) +
+  aes(x = time, y = Hdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("H"~" "~(W%.%m^2)),
+       title = bquote("H difference (ic - corn, sunny noon Rn)")) +
+  theme_par()
+
+#### Rn diurnral ####
+ggplot(data = diurnal_graph_data_s6) +
+  aes(x = time, y = Rdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(R[n]~" "~(W%.%m^2)),
+       title = bquote(R[n]~"differnce (ic - corn, sunny noon Rn)")) +
+  theme_par()
+
+ #### lam_ET diurnral ####
+ ggplot(data = diurnal_graph_data_s6) +
+   aes(x = time, y = etdiff) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(lambda~"ET "~(W%.%m^2)),
+        title = bquote(lambda~"ET differnce (ic - corn, sunny noon Rn)")) +
+   theme_par()
+
+#### GO diurnral ####
+ggplot(data = diurnal_graph_data_s6) +
+  aes(x = time, y = Gdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(G[0]~" "~(W%.%m^2)),
+       title= bquote(G[0]~"differnce (ic - corn, sunny noon Rn)")) +
+  theme_par()
+
+#### ttat diurnral ####
+
+ggplot(data = diurnal_graph_data_s6) +
+  aes(x = time, y = Tdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("ttat "~degree*C),
+       title= "Canopy temp difference (ic - corn, sunny noon Rn)") +
+  theme_par()
+
+ #### Averaged diurnal measures (sunny) (diff, corn-ic) dat 7 (prop Rn)####
+ 
+ dat_diurnal_s7 <- dat7_su_percent %>%
+   group_by(treatment, t)%>%
+   summarise(H=mean(h),
+             lamet = mean(lamet.ave),
+             G=mean(g0),
+             T=mean(ttat),
+             R=mean(rn))
+
+dat_diurnal_s7 <- as.data.frame(dat_diurnal_s7)
+
+dat_di_corn_s7 <- dat_diurnal_s7%>%
+  filter(treatment == "corn")
+
+dat_di_ic_s7 <- dat_diurnal_s7%>%
+  filter(treatment == "ic")
+
+Hdiff <- data.frame(Hdiff=as.numeric())
+etdiff <- data.frame(etdiff=as.numeric())
+Gdiff <- data.frame(Gdiff=as.numeric())
+Tdiff <- data.frame(Tdiff=as.numeric())
+Rdiff <- data.frame(Rdiff=as.numeric())
+
+for (i in 1:nrow(dat_di_corn_s7)){
+  Hdiff[i,1] <- dat_di_ic_s7[i,3]-dat_di_corn_s7[i,3]
+  etdiff[i,1] <- dat_di_ic_s7[i,4]-dat_di_corn_s7[i,4]
+  Gdiff[i,1] <- dat_di_ic_s7[i,5]-dat_di_corn_s7[i,5]
+  Tdiff[i,1] <- dat_di_ic_s7[i,6]-dat_di_corn_s7[i,6]
+  Rdiff[i,1] <- dat_di_ic_s7[i,7]-dat_di_corn_s7[i,7]
+}
+
+time <- dat_di_ic_s7$t
+diurnal_graph_data_s7 <- cbind(time,Hdiff,etdiff,Gdiff,Tdiff,Rdiff)
+
+
+#### H diurnral ####
+ggplot(data = diurnal_graph_data_s7) +
+  aes(x = time, y = Hdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("H"~" "~(W%.%m^2)),
+       title = bquote("H difference (ic - corn, sunny prop 9-3, >0.3)")) +
+  theme_par()
+
+#### Rn diurnral ####
+ggplot(data = diurnal_graph_data_s7) +
+  aes(x = time, y = Rdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(R[n]~" "~(W%.%m^2)),
+       title = bquote(R[n]~"differnce (ic - corn, sunny prop 9-3, >0.3)")) +
+  theme_par()
+
+ #### lam_ET diurnral ####
+ ggplot(data = diurnal_graph_data_s7) +
+   aes(x = time, y = etdiff) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(lambda~"ET "~(W%.%m^2)),
+        title = bquote(lambda~"ET differnce (ic - corn, sunny prop 9-3, >0.3)")) +
+   theme_par()
+
+#### GO diurnral ####
+ggplot(data = diurnal_graph_data_s7) +
+  aes(x = time, y = Gdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(G[0]~" "~(W%.%m^2)),
+       title= bquote(G[0]~"differnce (ic - corn, sunny prop 9-3, >0.3)")) +
+  theme_par()
+
+#### ttat diurnral ####
+
+ggplot(data = diurnal_graph_data_s7) +
+  aes(x = time, y = Tdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("ttat "~degree*C),
+       title= "Canopy temp difference (ic - corn, sunny prop 9-3, >0.3)") +
+  theme_par()
+
+#### Averaged diurnal measures (cloudy) (diff, corn-ic) dat 6 (noon Rn)####
+ 
+dat_diurnal_c6 <- dat6_cl_noon %>%
+   group_by(treatment, t)%>%
+   summarise(H=mean(h),
+             lamet = mean(lamet.ave),
+             G=mean(g0),
+             T=mean(ttat),
+             R=mean(rn))
+
+dat_diurnal_c6 <- as.data.frame(dat_diurnal_c6)
+
+dat_di_corn_c6 <- dat_diurnal_c6%>%
+  filter(treatment == "corn")
+
+dat_di_ic_c6 <- dat_diurnal_c6%>%
+  filter(treatment == "ic")
+
+Hdiff <- data.frame(Hdiff=as.numeric())
+etdiff <- data.frame(etdiff=as.numeric())
+Gdiff <- data.frame(Gdiff=as.numeric())
+Tdiff <- data.frame(Tdiff=as.numeric())
+Rdiff <- data.frame(Rdiff=as.numeric())
+
+for (i in 1:nrow(dat_di_corn_c6)){
+  Hdiff[i,1] <- dat_di_ic_c6[i,3]-dat_di_corn_c6[i,3]
+  etdiff[i,1] <- dat_di_ic_c6[i,4]-dat_di_corn_c6[i,4]
+  Gdiff[i,1] <- dat_di_ic_c6[i,5]-dat_di_corn_c6[i,5]
+  Tdiff[i,1] <- dat_di_ic_c6[i,6]-dat_di_corn_c6[i,6]
+  Rdiff[i,1] <- dat_di_ic_c6[i,7]-dat_di_corn_c6[i,7]
+}
+
+time <- dat_di_ic_c6$t
+diurnal_graph_data_c6 <- cbind(time,Hdiff,etdiff,Gdiff,Tdiff,Rdiff)
+
+
+#### H diurnral ####
+ggplot(data = diurnal_graph_data_c6) +
+  aes(x = time, y = Hdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("H"~" "~(W%.%m^2)),
+       title = bquote("H difference (ic - corn, cloudy noon Rn)")) +
+  theme_par()
+
+#### Rn diurnral ####
+ggplot(data = diurnal_graph_data_c6) +
+  aes(x = time, y = Rdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(R[n]~" "~(W%.%m^2)),
+       title = bquote(R[n]~"differnce (ic - corn, cloudy noon Rn)")) +
+  theme_par()
+
+ #### lam_ET diurnral ####
+ ggplot(data = diurnal_graph_data_c6) +
+   aes(x = time, y = etdiff) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(lambda~"ET "~(W%.%m^2)),
+        title = bquote(lambda~"ET differnce (ic - corn, cloudy noon Rn)")) +
+   theme_par()
+
+#### GO diurnral ####
+ggplot(data = diurnal_graph_data_c6) +
+  aes(x = time, y = Gdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(G[0]~" "~(W%.%m^2)),
+       title= bquote(G[0]~"differnce (ic - corn, cloudy noon Rn)")) +
+  theme_par()
+
+#### ttat diurnral ####
+
+ggplot(data = diurnal_graph_data_c6) +
+  aes(x = time, y = Tdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("ttat "~degree*C),
+       title= "Canopy temp difference (ic - corn, cloudy noon Rn)") +
+  theme_par()
+
+ #### Averaged diurnal measures (cloudy) (diff, corn-ic) dat 7 (prop Rn)####
+ 
+ dat_diurnal_c7 <- dat7_cl_percent %>%
+   group_by(treatment, t)%>%
+   summarise(H=mean(h),
+             lamet = mean(lamet.ave),
+             G=mean(g0),
+             T=mean(ttat),
+             R=mean(rn))
+
+dat_diurnal_c7 <- as.data.frame(dat_diurnal_c7)
+
+dat_di_corn_c7 <- dat_diurnal_c7%>%
+  filter(treatment == "corn")
+
+dat_di_ic_c7 <- dat_diurnal_c7%>%
+  filter(treatment == "ic")
+
+Hdiff <- data.frame(Hdiff=as.numeric())
+etdiff <- data.frame(etdiff=as.numeric())
+Gdiff <- data.frame(Gdiff=as.numeric())
+Tdiff <- data.frame(Tdiff=as.numeric())
+Rdiff <- data.frame(Rdiff=as.numeric())
+
+for (i in 1:nrow(dat_di_corn_c7)){
+  Hdiff[i,1] <- dat_di_ic_c7[i,3]-dat_di_corn_c7[i,3]
+  etdiff[i,1] <- dat_di_ic_c7[i,4]-dat_di_corn_c7[i,4]
+  Gdiff[i,1] <- dat_di_ic_c7[i,5]-dat_di_corn_c7[i,5]
+  Tdiff[i,1] <- dat_di_ic_c7[i,6]-dat_di_corn_c7[i,6]
+  Rdiff[i,1] <- dat_di_ic_c7[i,7]-dat_di_corn_c7[i,7]
+}
+
+time <- dat_di_ic_c7$t
+diurnal_graph_data_c7 <- cbind(time,Hdiff,etdiff,Gdiff,Tdiff,Rdiff)
+
+
+#### H diurnral ####
+ggplot(data = diurnal_graph_data_c7) +
+  aes(x = time, y = Hdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("H"~" "~(W%.%m^2)),
+       title = bquote("H difference (ic - corn, cloudy prop 9-3, <0.3)")) +
+  theme_par()
+
+#### Rn diurnral ####
+ggplot(data = diurnal_graph_data_c7) +
+  aes(x = time, y = Rdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(R[n]~" "~(W%.%m^2)),
+       title = bquote(R[n]~"differnce (ic - corn, cloudy prop 9-3, <0.3)")) +
+  theme_par()
+
+ #### lam_ET diurnral ####
+ ggplot(data = diurnal_graph_data_c7) +
+   aes(x = time, y = etdiff) +
+   geom_point() +
+   scale_color_brewer(palette = "Greys") +
+   labs(x = "Time of Day (Hours)",
+        y = bquote(lambda~"ET "~(W%.%m^2)),
+        title = bquote(lambda~"ET differnce (ic - corn, cloudy prop 9-3, <0.3)")) +
+   theme_par()
+
+#### GO diurnral ####
+ggplot(data = diurnal_graph_data_c7) +
+  aes(x = time, y = Gdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote(G[0]~" "~(W%.%m^2)),
+       title= bquote(G[0]~"differnce (ic - corn, cloudy prop 9-3, <0.3)")) +
+  theme_par()
+
+#### ttat diurnral ####
+
+ggplot(data = diurnal_graph_data_c7) +
+  aes(x = time, y = Tdiff) +
+  geom_point() +
+  scale_color_brewer(palette = "Greys") +
+  labs(x = "Time of Day (Hours)",
+       y = bquote("ttat "~degree*C),
+       title= "Canopy temp difference (ic - corn, cloudy prop 9-3, <0.3)") +
+  theme_par()
+```
+
+
+
+
+## Time series analysis
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+dat_time_day <- dat2%>%
+  filter(dayofyear<=250)%>%
+  mutate(dayofyear = signif(dayofyear, digits = 5))%>%
+  mutate(dayofyear = as.factor(floor(dayofyear)))%>%
+  mutate(id = 
+           ifelse(block == "1" & treatment == "corn","1",
+           ifelse(block == "2" & treatment == "corn","2",
+           ifelse(block == "3" & treatment == "corn","3",
+           ifelse(block == "1" & treatment == "ic","4",
+           ifelse(block == "2" & treatment == "ic","5",
+           ifelse(block == "3" & treatment == "ic","6",
+           ifelse(block == "1" & treatment == "soy","7",
+           ifelse(block == "2" & treatment == "soy","8","9")))))))))
+  # group_by(dayofyear,treatment,block)%>%
+  # summarise(cET=sum(et.ave))
+
+dat_sas <- dat_time_day%>%
+  select(c("dayofyear","block","treatment","rn","g0","h","lamet.ave","et.ave","t","id","cumdays"))%>%
+  group_by(block, treatment, id,t)%>%
+  summarise(mean_rn=mean(rn),mean_g0=mean(g0),mean_h=mean(h),mean_lamet=mean(lamet.ave),mean_et=mean(et.ave))#%>%
+  # mutate(t = as.factor(t))
+  # mutate(day = floor(as.numeric(as.character(dayofyear))))
+write.csv(dat_sas, file = "sas_repeated.csv")
+
+dat_sas_rand <- dat_time_day%>%
+  select(c("dayofyear","block","treatment","rn","g0","h","lamet.ave","et.ave","t","id","cumdays"))%>%
+  mutate(t = as.factor(t))
+write.csv(dat_sas_rand, file = "sas_repeated_day_rand.csv")
+
+
+plot=ggplot(dat_sas,aes(x=t,y=mean_et,group=treatment, color=treatment))
+plot=plot+geom_point()
+plot=plot+geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), level=0.95)
+plot
+
+m2 <- gamm(mean_et ~ s(t, by=treatment, k=-1) + treatment,
+           random = list(block=~1),data = dat_sas,
+           correlation = corAR1(form = ~ 1|block*id))
+
+m1 <- gamm(mean_et ~ s(t, by=treatment) + treatment,
+           random = list(block=~1),data = dat_sas)
+
+m0 = gam(mean_et ~ s(t, by=treatment,k=-1) + treatment,data = dat_sas)
+
+plot(m2$gam, shade = TRUE, pages = 1, scale = 0)
+
+
+fit_sas = lme(mean_et ~ treatment*t,
+              random = ~1|id,
+              data=dat_sas,
+              correlation = corAR1(form=~1|id))
+
+```
+
+
+### Average ET by hour
+
+
+
+### Daily cET
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(nlme)
+library(mgcv)
+
+tmp <- tempfile()
+download.file("https://github.com/gavinsimpson/random_code/raw/master/derivFun.R",
+              tmp, method = "wget")
+source(tmp)
+tmp <- tempfile()
+download.file("https://github.com/gavinsimpson/random_code/raw/master/tsDiagGamm.R",
+              tmp, method = "wget")
+source(tmp)
+
+
+
+
+
+m <- gam(lamet.ave ~ treatment + s(t, by = treatment), data = dat_time_sas)
+summary(m)
+plot(m, residuals = TRUE, pch = 19, cex = 0.75)
+
+# Include the variable "id" instead of "treatment*block"
+# Include block
+m2 <- gamm(lamet.ave ~ treatment + s(cumdays, by = treatment), data = dat_time_day, correlation = corAR1(form = ~ cumdays|id))
+```
+
